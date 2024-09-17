@@ -1,15 +1,21 @@
 package main
 
 import (
+	"context"
 	"flag"
 	"fmt"
+	"go/parser"
+	"go/token"
 	"io"
+	"log"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 
 	"github.com/google/uuid"
+	"github.com/gostdlib/concurrency/goroutines/pooled"
+	"github.com/gostdlib/concurrency/prim/wait"
 )
 
 var helpText = `
@@ -38,8 +44,9 @@ Flags:
 
 var (
 	help           = flag.Bool("help", false, "Show help")
-	generatedFiles = flag.Bool("generated", true, "Field align generated files")
+	generatedFiles = flag.Bool("generated", false, "Field align generated files")
 	testFiles      = flag.Bool("testFiles", true, "Field align test files")
+	runTests       = flag.Bool("runTests", false, "Will run tests before building the binary")
 	goflags        stringArray
 )
 
@@ -100,6 +107,15 @@ func copyFiles(srcPath, dstPath string) error {
 	return filepath.WalkDir(
 		srcPath,
 		func(path string, d os.DirEntry, err error) error {
+			switch {
+			case path == srcPath:
+				return nil
+			case d.IsDir() && strings.HasPrefix(d.Name(), "."):
+				// Skip this directory and all of its contents
+				return filepath.SkipDir
+			case err != nil:
+				return err
+			}
 			if path == srcPath {
 				return nil
 			}
@@ -116,7 +132,7 @@ func copyFiles(srcPath, dstPath string) error {
 
 			// Check if the current path is a directory
 			if d.IsDir() {
-				if err := os.MkdirAll(dest, d.Type()); err != nil {
+				if err := os.MkdirAll(dest, 0750); err != nil {
 					return err
 				}
 				return nil
@@ -130,6 +146,43 @@ func copyFiles(srcPath, dstPath string) error {
 			return nil
 		},
 	)
+}
+
+func shouldOptimize(dir string) (bool, error) {
+	df, err := os.ReadDir(dir)
+	if err != nil {
+		return false, err
+	}
+	fset := token.NewFileSet()
+
+	foundGo := false
+	for _, d := range df {
+		path := filepath.Join(dir, d.Name())
+		// Skip non-Go files
+		if filepath.Ext(path) != ".go" {
+			continue
+		}
+		foundGo = true
+
+		// Parse the file
+		node, err := parser.ParseFile(fset, path, nil, parser.ImportsOnly)
+		if err != nil {
+			return false, err
+		}
+
+		// Check the imports in the file
+		for _, imp := range node.Imports {
+			// The path value includes quotes, so we need to trim them
+			importPath := imp.Path.Value[1 : len(imp.Path.Value)-1]
+			if importPath == "reflect" {
+				return false, nil
+			}
+		}
+	}
+	if foundGo {
+		return true, nil
+	}
+	return false, nil
 }
 
 // copyFile copies a file from src to dst
@@ -186,6 +239,78 @@ func isExecutable(path string) (bool, error) {
 	return isExec, nil
 }
 
+func optimize(root string) error {
+	pool, err := pooled.New("optimizer", 5)
+	if err != nil {
+		return err
+	}
+	defer pool.Close()
+
+	wg := wait.Group{
+		Pool: pool,
+	}
+	ctx := context.Background()
+
+	wdErr := filepath.WalkDir(
+		root,
+		func(path string, d os.DirEntry, err error) error {
+			switch {
+			case err != nil:
+				return err
+			case d.IsDir() && strings.HasPrefix(d.Name(), "."):
+				// Skip this directory and all of its contents
+				return filepath.SkipDir
+			case d.IsDir():
+				optimize, err := shouldOptimize(path)
+				if err != nil {
+					return err
+				}
+				if optimize {
+					args := []string{"-apply"}
+					if *generatedFiles {
+						args = append(args, "-generated_files")
+					}
+					if *testFiles {
+						args = append(args, "-test_files")
+					}
+					args = append(args, ".")
+					wg.Go(
+						ctx,
+						func(ctx context.Context) error {
+							fmt.Println("Optimizing: ", path)
+							defer fmt.Println("done with: ", path)
+							// Run betteralign twice to ensure that the alignment is correct.
+							for i := 0; i < 2; i++ {
+								var out []byte
+								cmd := exec.Command(alignPath, args...)
+								cmd.Path = path
+								out, err = exec.Command(alignPath, args...).CombinedOutput()
+								if err != nil {
+									fmt.Printf("Could not run betteralign: %v\n%s", err, out)
+									return err
+								}
+							}
+							return nil
+						},
+					)
+				}
+			}
+			return nil
+		},
+	)
+
+	log.Println("Waiting for all optimizations to finish")
+	if err := wg.Wait(context.Background()); err != nil {
+		return err
+	}
+	log.Println("All optimizations finished")
+
+	if wdErr != nil {
+		return wdErr
+	}
+	return nil
+}
+
 func main() {
 	flag.Var(&goflags, "goflags", "Additional flags to pass to go compiler")
 	flag.Parse()
@@ -221,12 +346,13 @@ func main() {
 		fmt.Printf("Could not create temporary directory: %v", err)
 		return
 	}
-	defer func() {
-		if err := os.RemoveAll(tmpDir); err != nil {
-			fmt.Printf("Could not remove temporary directory: %v", err)
-		}
-	}()
-
+	/*
+		defer func() {
+			if err := os.RemoveAll(tmpDir); err != nil {
+				fmt.Printf("Could not remove temporary directory: %v", err)
+			}
+		}()
+	*/
 	if err = copyFiles(modPath, tmpDir); err != nil {
 		fmt.Printf("Could not copy files to temporary directory: %v", err)
 		return
@@ -249,24 +375,26 @@ func main() {
 	}
 
 	// Run betteralign.
-	args := []string{"-apply"}
-	if *generatedFiles {
-		args = append(args, "-generated_files")
-	}
-	if *testFiles {
-		args = append(args, "-test_files")
-	}
-	args = append(args, "./...")
-	// Run betteralign twice to ensure that the alignment is correct.
-	for i := 0; i < 2; i++ {
-		var out []byte
-		out, err = exec.Command(alignPath, args...).CombinedOutput()
-		if err != nil {
-			fmt.Printf("Could not run betteralign: %v\n%s", err, out)
-			return
-		}
+	if err := optimize(tmpDir); err != nil {
+		fmt.Printf("Could not optimize files: %v", err)
+		return
 	}
 
+	// Run tests if the flag is set.
+	if *runTests {
+		log.Println("running tests")
+		cmd := exec.Command(goExecPath, "test", "./...")
+		cmd.Dir = tmpDir
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			fmt.Printf("Problem running tests: %v\n%s", err, string(out))
+			return
+		}
+		fmt.Println("Test output:\n")
+		fmt.Println(string(out))
+	}
+
+	log.Println("preparing for build")
 	// Run go build.
 	relPath, err := filepath.Rel(modPath, originalDir)
 	if err != nil {
@@ -281,7 +409,7 @@ func main() {
 		return
 	}
 
-	args = []string{"build"}
+	args := []string{"build"}
 	if goflags != nil {
 		args = append(args, goflags...)
 	}

@@ -40,6 +40,8 @@ Flags:
         Additional flags to pass to the go command. Can be specified multiple times.
      	Does not require quotes around the flag as normally done. Aka 'go build --ldflags="-s -w"'
        	becomes 'goptimizer --goflags="--ldflags=-s -w"'
+  -keep bool
+  		Keep the temporary directory with the aligned files.
 `
 
 var (
@@ -47,6 +49,7 @@ var (
 	generatedFiles = flag.Bool("generated", false, "Field align generated files")
 	testFiles      = flag.Bool("testFiles", true, "Field align test files")
 	runTests       = flag.Bool("runTests", false, "Will run tests before building the binary")
+	keep           = flag.Bool("keep", false, "Keep the temporary directory with the aligned files")
 	goflags        stringArray
 )
 
@@ -348,8 +351,10 @@ func main() {
 	}
 	/*
 		defer func() {
-			if err := os.RemoveAll(tmpDir); err != nil {
-				fmt.Printf("Could not remove temporary directory: %v", err)
+			if !*keep {
+				if err := os.RemoveAll(tmpDir); err != nil {
+					fmt.Printf("Could not remove temporary directory: %v", err)
+				}
 			}
 		}()
 	*/

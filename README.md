@@ -2,7 +2,7 @@
 Optimizes go code using betteralign.
 
 This is a wrapper around the betteralign and go tooling. This will copy all files under the
-current `go.mod` file to a temporary directory, go vendor all the coee, run `betteralign` on them
+current `go.mod` file to a temporary directory, go vendor all the code, run `betteralign` on them
 on all packages and then use `go` to build the binary. The binary is then copied back to the
 original directory.
 
@@ -26,8 +26,19 @@ There is also a flag to make sure that tests are working.  This will run `go tes
 This program is quite slow, so it should only be done as an optimization step before a release.
 
 ## Usage
+
+Simply run `goptimizer` in the directory of your go main file. This only works with go modules.
+
 ```bash
 goptimizer [flags]
 ```
 
-Simply run `goptimizer` in the directory of your go main file. This only works with go modules.
+I like to run it like this:
+
+```bash
+go test ./...
+[Make sure that works]
+goptimizer --goflags="--ldflags=-s -w" --runTests
+```
+
+This makes sure that all tests work after being aligned before it builds the final binary.

@@ -1,12 +1,8 @@
 package main
 
 import (
-	"context"
 	"flag"
 	"fmt"
-	"go/parser"
-	"go/token"
-	"io"
 	"log"
 	"os"
 	"os/exec"
@@ -14,8 +10,9 @@ import (
 	"strings"
 
 	"github.com/google/uuid"
-	"github.com/gostdlib/concurrency/goroutines/pooled"
-	"github.com/gostdlib/concurrency/prim/wait"
+	"github.com/gostdlib/base/context"
+	"github.com/johnsiilver/goptimizer/files"
+	"github.com/johnsiilver/goptimizer/optimize"
 )
 
 var helpText = `
@@ -46,10 +43,12 @@ Flags:
 
 var (
 	help           = flag.Bool("help", false, "Show help")
+	fieldAlign     = flag.Bool("fieldAlign", true, "Field align source files")
 	generatedFiles = flag.Bool("generated", false, "Field align generated files")
 	testFiles      = flag.Bool("testFiles", true, "Field align test files")
 	runTests       = flag.Bool("runTests", false, "Will run tests before building the binary")
 	keep           = flag.Bool("keep", false, "Keep the temporary directory with the aligned files")
+	doNotVendor    = flag.Bool("doNotVendor", false, "Do not run 'go mod vendor' before building")
 	goflags        stringArray
 )
 
@@ -86,235 +85,9 @@ func (s *stringArray) Set(value string) error {
 	return nil
 }
 
-// findGoMod returns the path to the go.mod file in the current directory.
-func findGoMod() (string, error) {
-	b, err := exec.Command(goExecPath, "env", "GOMOD").CombinedOutput()
-	if err != nil {
-		return "", fmt.Errorf("failed to run go env GOMOD: %v", err)
-	}
-
-	modPath := strings.TrimSpace(string(b))
-	switch modPath {
-	case "":
-		return "", fmt.Errorf("go mod not found")
-	case "/dev/null":
-		return "", fmt.Errorf("go mod not found")
-	}
-
-	return modPath, nil
-}
-
-// copyFiles copies all directories and files recursively from srcPath to dstPath,
-// but only if a directory contains at least one .go file.
-func copyFiles(srcPath, dstPath string) error {
-	return filepath.WalkDir(
-		srcPath,
-		func(path string, d os.DirEntry, err error) error {
-			switch {
-			case path == srcPath:
-				return nil
-			case d.IsDir() && strings.HasPrefix(d.Name(), "."):
-				// Skip this directory and all of its contents
-				return filepath.SkipDir
-			case err != nil:
-				return err
-			}
-			if path == srcPath {
-				return nil
-			}
-			if err != nil {
-				return err
-			}
-
-			// Calculate the destination path
-			relPath, err := filepath.Rel(srcPath, path)
-			if err != nil {
-				return err
-			}
-			dest := filepath.Join(dstPath, relPath)
-
-			// Check if the current path is a directory
-			if d.IsDir() {
-				if err := os.MkdirAll(dest, 0750); err != nil {
-					return err
-				}
-				return nil
-			}
-
-			fi, err := d.Info()
-			if err != nil {
-			}
-			if err := copyFile(path, dest, fi.Mode()); err != nil {
-			}
-			return nil
-		},
-	)
-}
-
-func shouldOptimize(dir string) (bool, error) {
-	df, err := os.ReadDir(dir)
-	if err != nil {
-		return false, err
-	}
-	fset := token.NewFileSet()
-
-	foundGo := false
-	for _, d := range df {
-		path := filepath.Join(dir, d.Name())
-		// Skip non-Go files
-		if filepath.Ext(path) != ".go" {
-			continue
-		}
-		foundGo = true
-
-		// Parse the file
-		node, err := parser.ParseFile(fset, path, nil, parser.ImportsOnly)
-		if err != nil {
-			return false, err
-		}
-
-		// Check the imports in the file
-		for _, imp := range node.Imports {
-			// The path value includes quotes, so we need to trim them
-			importPath := imp.Path.Value[1 : len(imp.Path.Value)-1]
-			if importPath == "reflect" {
-				return false, nil
-			}
-		}
-	}
-	if foundGo {
-		return true, nil
-	}
-	return false, nil
-}
-
-// copyFile copies a file from src to dst
-func copyFile(src, dst string, mode os.FileMode) error {
-	srcFile, err := os.Open(src)
-	if err != nil {
-		return err
-	}
-	defer srcFile.Close()
-
-	dstFile, err := os.OpenFile(dst, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, mode)
-	if err != nil {
-		return err
-	}
-	defer dstFile.Close()
-
-	_, err = io.Copy(dstFile, srcFile)
-	return err
-}
-
-func diffDirs(a, b []os.DirEntry) []os.DirEntry {
-	m := make(map[string]os.DirEntry)
-	for _, f := range a {
-		if f.IsDir() {
-			continue
-		}
-		m[f.Name()] = f
-	}
-
-	var diff []os.DirEntry
-	for _, f := range b {
-		if f.IsDir() {
-			continue
-		}
-		if _, ok := m[f.Name()]; !ok {
-			diff = append(diff, f)
-		}
-	}
-
-	return diff
-}
-
-// isExecutable checks if the given file path points to an executable file.
-func isExecutable(path string) (bool, error) {
-	info, err := os.Stat(path)
-	if err != nil {
-		return false, err
-	}
-
-	// Check if the file is executable by the owner, group, or others
-	mode := info.Mode()
-	isExec := mode&0111 != 0 // Checks any executable bit (owner, group, others)
-
-	return isExec, nil
-}
-
-func optimize(root string) error {
-	pool, err := pooled.New("optimizer", 5)
-	if err != nil {
-		return err
-	}
-	defer pool.Close()
-
-	wg := wait.Group{
-		Pool: pool,
-	}
+func main() {
 	ctx := context.Background()
 
-	wdErr := filepath.WalkDir(
-		root,
-		func(path string, d os.DirEntry, err error) error {
-			switch {
-			case err != nil:
-				return err
-			case d.IsDir() && strings.HasPrefix(d.Name(), "."):
-				// Skip this directory and all of its contents
-				return filepath.SkipDir
-			case d.IsDir():
-				optimize, err := shouldOptimize(path)
-				if err != nil {
-					return err
-				}
-				if optimize {
-					args := []string{"-apply"}
-					if *generatedFiles {
-						args = append(args, "-generated_files")
-					}
-					if *testFiles {
-						args = append(args, "-test_files")
-					}
-					args = append(args, ".")
-					wg.Go(
-						ctx,
-						func(ctx context.Context) error {
-							fmt.Println("Optimizing: ", path)
-							defer fmt.Println("done with: ", path)
-							// Run betteralign twice to ensure that the alignment is correct.
-							for i := 0; i < 2; i++ {
-								var out []byte
-								cmd := exec.Command(alignPath, args...)
-								cmd.Path = path
-								out, err = exec.Command(alignPath, args...).CombinedOutput()
-								if err != nil {
-									fmt.Printf("Could not run betteralign: %v\n%s", err, out)
-									return err
-								}
-							}
-							return nil
-						},
-					)
-				}
-			}
-			return nil
-		},
-	)
-
-	log.Println("Waiting for all optimizations to finish")
-	if err := wg.Wait(context.Background()); err != nil {
-		return err
-	}
-	log.Println("All optimizations finished")
-
-	if wdErr != nil {
-		return wdErr
-	}
-	return nil
-}
-
-func main() {
 	flag.Var(&goflags, "goflags", "Additional flags to pass to go compiler")
 	flag.Parse()
 
@@ -326,10 +99,10 @@ func main() {
 	originalDir, err := os.Getwd()
 	if err != nil {
 		fmt.Printf("Could not get current directory: %v", err)
-		return
+		os.Exit(1)
 	}
 
-	modPath, err := findGoMod()
+	modPath, err := files.FindGoMod(goExecPath)
 	if err != nil {
 		fmt.Println(err)
 		os.Exit(1)
@@ -349,16 +122,18 @@ func main() {
 		fmt.Printf("Could not create temporary directory: %v", err)
 		return
 	}
-	/*
-		defer func() {
-			if !*keep {
-				if err := os.RemoveAll(tmpDir); err != nil {
-					fmt.Printf("Could not remove temporary directory: %v", err)
-				}
+	defer func() {
+		if !*keep {
+			if err := os.RemoveAll(tmpDir); err != nil {
+				fmt.Printf("Could not remove temporary directory: %v", err)
 			}
-		}()
-	*/
-	if err = copyFiles(modPath, tmpDir); err != nil {
+		}
+		if err != nil {
+			os.Exit(1)
+		}
+	}()
+
+	if err := files.CreateOptimized(modPath, tmpDir); err != nil {
 		fmt.Printf("Could not copy files to temporary directory: %v", err)
 		return
 	}
@@ -369,34 +144,32 @@ func main() {
 	}
 	fmt.Println("temporary build directory: ", tmpDir)
 
-	// Run go mod tidy and go mod vendor.
 	if err = exec.Command(goExecPath, "mod", "tidy").Run(); err != nil {
 		fmt.Printf("Could not run go mod tidy: %v", err)
 		return
 	}
-	if err = exec.Command(goExecPath, "mod", "vendor").Run(); err != nil {
-		fmt.Printf("Could not run go mod vendor: %v", err)
-		return
-	}
 
-	// Run betteralign.
-	if err := optimize(tmpDir); err != nil {
-		fmt.Printf("Could not optimize files: %v", err)
-		return
-	}
-
-	// Run tests if the flag is set.
-	if *runTests {
-		log.Println("running tests")
-		cmd := exec.Command(goExecPath, "test", "./...")
-		cmd.Dir = tmpDir
-		out, err := cmd.CombinedOutput()
-		if err != nil {
-			fmt.Printf("Problem running tests: %v\n%s", err, string(out))
+	if !*doNotVendor {
+		if err = exec.Command(goExecPath, "mod", "vendor").Run(); err != nil {
+			fmt.Printf("Could not run go mod vendor: %v", err)
 			return
 		}
-		fmt.Println("Test output:\n")
-		fmt.Println(string(out))
+	}
+
+	err = optimize.Packages(
+		ctx,
+		optimize.Args{
+			Root:       tmpDir,
+			GoExecPath: goExecPath,
+			AlignPath:  alignPath,
+			FieldAlign: *fieldAlign,
+			Generated:  *generatedFiles,
+			TestFiles:  *testFiles,
+		},
+	)
+	if err != nil {
+		fmt.Printf("Could not optimize packages: %v", err)
+		return
 	}
 
 	log.Println("preparing for build")
@@ -408,7 +181,7 @@ func main() {
 
 	p := filepath.Join(tmpDir, relPath)
 
-	before, err := os.ReadDir(p)
+	ac, err := files.NewAddedOrChanged(p)
 	if err != nil {
 		fmt.Printf("Could not stat temporary directory: %v", err)
 		return
@@ -424,23 +197,20 @@ func main() {
 		return
 	}
 
-	after, err := os.ReadDir(p)
+	diff, err := ac.Compare()
 	if err != nil {
-		fmt.Printf("Could not stat temporary directory: %v", err)
+		fmt.Printf("Could not check for modified files: %v", err)
 		return
 	}
-
-	// Check if any files were modified.
-	diff := diffDirs(before, after)
 	var executable []os.DirEntry
 	for _, f := range diff {
-		execute, err := isExecutable(filepath.Join(tmpDir, f.Name()))
+		execute, err := files.IsExecutable(filepath.Join(tmpDir, f.DirEntry.Name()))
 		if err != nil {
 			fmt.Printf("Could not check if file is executable: %v", err)
 			return
 		}
 		if execute {
-			executable = append(executable, f)
+			executable = append(executable, f.DirEntry)
 		}
 	}
 
@@ -458,7 +228,7 @@ func main() {
 	// Copy the executable to the original directory.
 	srcFile := filepath.Join(tmpDir, executable[0].Name())
 	dstFile := filepath.Join(originalDir, executable[0].Name())
-	if err := copyFile(srcFile, dstFile, 0755); err != nil {
+	if err := files.CopyFile(srcFile, dstFile, 0755); err != nil {
 		fmt.Printf("Could not copy executable to original directory: %v", err)
 		return
 	}

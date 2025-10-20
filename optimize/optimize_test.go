@@ -12,12 +12,12 @@ func TestParsePackage(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
-		name              string
-		setup             func(t *testing.T) string
-		fieldAlignInput   bool
-		wantErr           bool
-		wantFieldAlign    bool
-		wantNextSet       bool
+		name            string
+		setup           func(t *testing.T) string
+		fieldAlignInput bool
+		wantErr         bool
+		wantFieldAlign  bool
+		wantNextMethod  string
 	}{
 		{
 			name: "Success: directory with Go files without reflect import",
@@ -47,7 +47,7 @@ func main() {
 			fieldAlignInput: true,
 			wantErr:         false,
 			wantFieldAlign:  true,
-			wantNextSet:     true,
+			wantNextMethod:  "github.com/johnsiilver/goptimizer/optimize.packageSM.fieldAlign",
 		},
 		{
 			name: "Success: directory with Go file that imports reflect",
@@ -80,7 +80,7 @@ func main() {
 			fieldAlignInput: true,
 			wantErr:         false,
 			wantFieldAlign:  false,
-			wantNextSet:     true,
+			wantNextMethod:  "github.com/johnsiilver/goptimizer/optimize.packageSM.fieldAlign",
 		},
 		{
 			name: "Success: directory with no Go files",
@@ -95,7 +95,7 @@ func main() {
 			fieldAlignInput: true,
 			wantErr:         false,
 			wantFieldAlign:  true,
-			wantNextSet:     false,
+			wantNextMethod:  "",
 		},
 		{
 			name: "Success: directory with mixed .go and non-.go files",
@@ -129,7 +129,7 @@ func hello() string {
 			fieldAlignInput: true,
 			wantErr:         false,
 			wantFieldAlign:  true,
-			wantNextSet:     true,
+			wantNextMethod:  "github.com/johnsiilver/goptimizer/optimize.packageSM.fieldAlign",
 		},
 		{
 			name: "Success: multiple Go files, one imports reflect",
@@ -173,7 +173,7 @@ func inspect(v interface{}) {
 			fieldAlignInput: true,
 			wantErr:         false,
 			wantFieldAlign:  false,
-			wantNextSet:     true,
+			wantNextMethod:  "github.com/johnsiilver/goptimizer/optimize.packageSM.fieldAlign",
 		},
 		{
 			name: "Success: fieldAlign already false",
@@ -203,7 +203,7 @@ func main() {
 			fieldAlignInput: false,
 			wantErr:         false,
 			wantFieldAlign:  false,
-			wantNextSet:     true,
+			wantNextMethod:  "github.com/johnsiilver/goptimizer/optimize.packageSM.fieldAlign",
 		},
 		{
 			name: "Error: directory does not exist",
@@ -214,7 +214,7 @@ func main() {
 			fieldAlignInput: true,
 			wantErr:         true,
 			wantFieldAlign:  true,
-			wantNextSet:     false,
+			wantNextMethod:  "",
 		},
 		{
 			name: "Success: invalid Go syntax in file does not cause error in packages.Load",
@@ -240,7 +240,7 @@ this is not valid Go syntax!!!
 			fieldAlignInput: true,
 			wantErr:         false,
 			wantFieldAlign:  true,
-			wantNextSet:     true,
+			wantNextMethod:  "github.com/johnsiilver/goptimizer/optimize.packageSM.fieldAlign",
 		},
 		{
 			name: "Success: empty directory",
@@ -250,7 +250,7 @@ this is not valid Go syntax!!!
 			fieldAlignInput: true,
 			wantErr:         false,
 			wantFieldAlign:  true,
-			wantNextSet:     false,
+			wantNextMethod:  "",
 		},
 		{
 			name: "Success: Go file with reflect in string literal should not affect fieldAlign",
@@ -281,7 +281,7 @@ func main() {
 			fieldAlignInput: true,
 			wantErr:         false,
 			wantFieldAlign:  true,
-			wantNextSet:     true,
+			wantNextMethod:  "github.com/johnsiilver/goptimizer/optimize.packageSM.fieldAlign",
 		},
 	}
 
@@ -314,9 +314,9 @@ func main() {
 				t.Errorf("TestParsePackage(%s): got fieldAlign %v, want %v", test.name, got.Data.fieldAlign, test.wantFieldAlign)
 			}
 
-			nextIsSet := got.Next != nil
-			if nextIsSet != test.wantNextSet {
-				t.Errorf("TestParsePackage(%s): got Next set %v, want %v", test.name, nextIsSet, test.wantNextSet)
+			gotNextMethod := statemachine.MethodName(got.Next)
+			if gotNextMethod != test.wantNextMethod {
+				t.Errorf("TestParsePackage(%s): got Next method %q, want %q", test.name, gotNextMethod, test.wantNextMethod)
 			}
 		})
 	}

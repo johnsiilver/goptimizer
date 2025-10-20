@@ -7,6 +7,7 @@ toolchain go1.24.2
 require (
 	github.com/google/uuid v1.6.0
 	github.com/gostdlib/base v0.0.0-20251006165448-0ffd4328fcdd
+	golang.org/x/tools v0.34.0
 )
 
 require (
@@ -89,7 +90,6 @@ require (
 	golang.org/x/term v0.32.0 // indirect
 	golang.org/x/text v0.26.0 // indirect
 	golang.org/x/time v0.9.0 // indirect
-	golang.org/x/tools v0.34.0 // indirect
 	google.golang.org/genproto v0.0.0-20220204002441-d6cc3cc0770e // indirect
 	google.golang.org/grpc v1.73.0 // indirect
 	google.golang.org/protobuf v1.36.6 // indirect

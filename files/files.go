@@ -94,14 +94,15 @@ func IsExecutable(path string) (bool, error) {
 	return isExec, nil
 }
 
+// ChangeType represents the type of change detected in a file.
 type ChangeType uint8
 
 const (
 	// CTUnknown indicates an unknown change type. This is always a bug.
 	CTUnknown ChangeType = iota
-	// CTAdded means the files was added to the directory.
+	// Added means the files was added to the directory.
 	Added
-	// CTModified means the file was modified in the directory.
+	// Modified means the file was modified in the directory.
 	Modified
 )
 

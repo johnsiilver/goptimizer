@@ -43,6 +43,8 @@ Flags:
 
 var (
 	help              = flag.Bool("help", false, "Show help")
+	goBinary          = flag.String("goBinary", "go", "Name of the go binary to use")
+	betterAlignBinary = flag.String("betterAlignBinary", "betteralign", "Name of the betteralign binary to use")
 	fieldAlign        = flag.Bool("fieldAlign", true, "Field align source files")
 	replaceInterfaces = flag.Bool("replaceInterfaces", true, "Replace interface types with concrete types where annotated")
 	generatedFiles    = flag.Bool("generated", false, "Field align generated files")
@@ -51,25 +53,6 @@ var (
 	doNotVendor       = flag.Bool("doNotVendor", false, "Do not run 'go mod vendor' before building")
 	goflags           stringArray
 )
-
-var (
-	goExecPath, alignPath string
-)
-
-func init() {
-	var err error
-	goExecPath, err = exec.LookPath("go")
-	if err != nil {
-		fmt.Println("go binary not found on path")
-		os.Exit(1)
-	}
-
-	alignPath, err = exec.LookPath("betteralign")
-	if err != nil {
-		fmt.Println("betteralign binary not found on path")
-		os.Exit(1)
-	}
-}
 
 // stringArray is a custom flag type that implements flag.Value to collect multiple strings
 type stringArray []string
@@ -85,11 +68,32 @@ func (s *stringArray) Set(value string) error {
 	return nil
 }
 
+var (
+	goExecPath, alignPath string
+)
+
+func lookups() {
+	var err error
+	goExecPath, err = exec.LookPath(*goBinary)
+	if err != nil {
+		fmt.Println("go binary not found on path")
+		os.Exit(1)
+	}
+
+	alignPath, err = exec.LookPath(*betterAlignBinary)
+	if err != nil {
+		fmt.Println("betteralign binary not found on path")
+		os.Exit(1)
+	}
+}
+
 func main() {
 	ctx := context.Background()
 
 	flag.Var(&goflags, "goflags", "Additional flags to pass to go compiler")
 	flag.Parse()
+
+	lookups()
 
 	if *help {
 		fmt.Println(helpText)

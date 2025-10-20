@@ -2,7 +2,6 @@ package optimize
 
 import (
 	"fmt"
-	"go/parser"
 	"go/token"
 	"os"
 	"os/exec"
@@ -11,6 +10,7 @@ import (
 
 	"github.com/gostdlib/base/context"
 	"github.com/gostdlib/base/statemachine"
+	"golang.org/x/tools/go/packages"
 )
 
 // Args holds the arguments for the Packages function.
@@ -23,6 +23,8 @@ type Args struct {
 	AlignPath string
 	// FieldAlign indicates whether to perform field alignment.
 	FieldAlign bool
+	// InterfaceReplacement indicates whether to perform interface replacement.
+	InterfaceReplacement bool
 	// Generated indicates whether to process generated files.
 	Generated bool
 	// TestFiles indicates whether to run tests on packages with test files.
@@ -42,7 +44,6 @@ func Packages(ctx context.Context, a Args) error {
 		generatedFiles: a.Generated,
 		testFiles:      a.TestFiles,
 	}
-	defers := []statemachine.DeferFn[data]{sm.runTests}
 
 	wdErr := filepath.WalkDir(
 		a.Root,
@@ -57,22 +58,19 @@ func Packages(ctx context.Context, a Args) error {
 				_ = wg.Go(
 					ctx,
 					func(ctx context.Context) error {
-						req, err := statemachine.Run(
+						_, err := statemachine.Run(
 							"",
 							statemachine.Request[data]{
 								Data: data{
-									path:       path,
-									fieldAlign: a.FieldAlign,
+									path:                 path,
+									fieldAlign:           a.FieldAlign,
+									interfaceReplacement: a.InterfaceReplacement,
 								},
-								Next:   sm.parsePackage,
-								Defers: defers,
+								Next: sm.parsePackage,
 							},
 						)
-						if err != nil || req.Data.testErr != nil {
+						if err != nil {
 							cancel()
-							if req.Data.testErr != nil {
-								err = req.Data.testErr
-							}
 						}
 						return err
 					},
@@ -94,9 +92,10 @@ type data struct {
 	path string
 	// fieldAlign indicates whether we should do field alignment.
 	fieldAlign bool
+	// interfaceReplacement indicates whether we should do interface replacement.
+	interfaceReplacement bool
 
-	// testErr is any error encountered while running tests on the package.
-	testErr error
+	pkg *packages.Package
 }
 
 // packageSM is the state machine for processing a package.
@@ -119,7 +118,6 @@ func (p packageSM) parsePackage(req statemachine.Request[data]) statemachine.Req
 		req.Err = err
 		return req
 	}
-	fset := token.NewFileSet()
 
 	foundGo := false
 	for _, d := range df {
@@ -129,16 +127,34 @@ func (p packageSM) parsePackage(req statemachine.Request[data]) statemachine.Req
 			continue
 		}
 		foundGo = true
+	}
+	if !foundGo {
+		return req
+	}
 
-		// Parse the file
-		node, err := parser.ParseFile(fset, path, nil, parser.ImportsOnly)
-		if err != nil {
-			req.Err = err
-			return req
-		}
+	cfg := &packages.Config{
+		Dir:  req.Data.path,
+		Fset: token.NewFileSet(),
+		Mode: packages.NeedName | packages.NeedFiles | packages.NeedSyntax,
+	}
+	pkgs, err := packages.Load(cfg, ".")
+	if err != nil {
+		req.Err = fmt.Errorf("failed to parse pacakge %q", req.Data.path)
+		return req
+	}
+	if len(pkgs) == 0 {
+		req.Err = fmt.Errorf("no packages found in %q", req.Data.path)
+		return req
+	}
+	if len(pkgs) > 1 {
+		req.Err = fmt.Errorf("multiple packages found in %q", req.Data.path)
+		return req
+	}
 
-		if req.Data.fieldAlign {
-			// Check the imports in the file
+	pkg := pkgs[0]
+
+	if req.Data.fieldAlign {
+		for _, node := range pkg.Syntax {
 			for _, imp := range node.Imports {
 				// The path value includes quotes, so we need to trim them
 				importPath := imp.Path.Value[1 : len(imp.Path.Value)-1]
@@ -149,9 +165,7 @@ func (p packageSM) parsePackage(req statemachine.Request[data]) statemachine.Req
 			}
 		}
 	}
-	if !foundGo {
-		return req
-	}
+	req.Data.pkg = pkg
 
 	req.Next = p.fieldAlign
 	return req
@@ -182,24 +196,36 @@ func (p packageSM) fieldAlign(req statemachine.Request[data]) statemachine.Reque
 			return req
 		}
 	}
+	req.Next = p.runTests
 
 	return req
 }
 
-// runTests runs the tests for the package if required. This implements the statemachine.DeferFn[data] signature.
-func (p packageSM) runTests(ctx context.Context, data data, err error) data {
-	if err != nil || p.testFiles {
-		return data
+// runTests runs tests on the package if required.
+func (p packageSM) runTests(req statemachine.Request[data]) statemachine.Request[data] {
+	if p.testFiles {
+		return req
 	}
-	if strings.Contains(data.path, "vendor") {
-		return data
+	//req.Next = p.interfaceReplacement
+
+	if strings.Contains(req.Data.path, "vendor") {
+		return req
 	}
 
 	cmd := exec.Command(p.goExecPath, "test", ".")
-	cmd.Dir = data.path
+	cmd.Dir = req.Data.path
 	out, err := cmd.CombinedOutput()
 	if err != nil {
-		data.testErr = fmt.Errorf("problem running tests: %v\n%s", err, string(out))
+		req.Err = fmt.Errorf("problem running tests: %v\n%s", err, string(out))
 	}
-	return data
+	return req
 }
+
+/*
+// interfaceReplacement performs interface replacement on the package if required.
+func (p packageSM) interfaceReplacement(req statemachine.Request[data]) statemachine.Request[data] {
+	if !req.Data.interfaceReplacement {
+		return req
+	}
+}
+*/

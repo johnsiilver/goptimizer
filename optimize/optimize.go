@@ -33,8 +33,8 @@ type Args struct {
 	InterfaceReplacement bool
 	// Generated indicates whether to process generated files.
 	Generated bool
-	// TestFiles indicates whether to run tests on packages with test files.
-	TestFiles bool
+	// RunTests indicates whether to run tests on packages with test files.
+	RunTests bool
 }
 
 // Packages optimizes all Go packages found under the specified root directory.
@@ -48,7 +48,7 @@ func Packages(ctx context.Context, a Args) error {
 		alignPath:      a.AlignPath,
 		goExecPath:     a.GoExecPath,
 		generatedFiles: a.Generated,
-		testFiles:      a.TestFiles,
+		testFiles:      a.RunTests,
 	}
 
 	wdErr := filepath.WalkDir(
@@ -186,9 +186,6 @@ func (p packageSM) fieldAlign(req statemachine.Request[data]) statemachine.Reque
 	args := []string{"-apply"}
 	if p.generatedFiles {
 		args = append(args, "-generated_files")
-	}
-	if p.testFiles {
-		args = append(args, "-test_files")
 	}
 	args = append(args, ".")
 

@@ -46,7 +46,6 @@ var (
 	fieldAlign        = flag.Bool("fieldAlign", true, "Field align source files")
 	replaceInterfaces = flag.Bool("replaceInterfaces", true, "Replace interface types with concrete types where annotated")
 	generatedFiles    = flag.Bool("generated", false, "Field align generated files")
-	testFiles         = flag.Bool("testFiles", true, "Field align test files")
 	runTests          = flag.Bool("runTests", false, "Will run tests before building the binary")
 	keep              = flag.Bool("keep", false, "Keep the temporary directory with the aligned files")
 	doNotVendor       = flag.Bool("doNotVendor", false, "Do not run 'go mod vendor' before building")
@@ -165,7 +164,7 @@ func main() {
 			AlignPath:  alignPath,
 			FieldAlign: *fieldAlign,
 			Generated:  *generatedFiles,
-			TestFiles:  *testFiles,
+			RunTests:   *runTests,
 		},
 	)
 	if err != nil {

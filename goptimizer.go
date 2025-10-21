@@ -7,8 +7,8 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"strings"
 
+	"github.com/google/shlex"
 	"github.com/google/uuid"
 	"github.com/gostdlib/base/context"
 	"github.com/johnsiilver/goptimizer/files"
@@ -29,16 +29,26 @@ Usage:
   goptimizer [flags]
 
 Flags:
-  -generated bool
-    	Field align generated files (default true)
-  -testFiles bool
-    	Field align test files (default true)
-  -goflags array
-        Additional flags to pass to the go command. Can be specified multiple times.
-     	Does not require quotes around the flag as normally done. Aka 'go build --ldflags="-s -w"'
-       	becomes 'goptimizer --goflags="--ldflags=-s -w"'
-  -keep bool
-  		Keep the temporary directory with the aligned files.
+  -help
+    	Show help
+  -goBinary string
+    	Name of the go binary to use (default "go")
+  -betterAlignBinary string
+    	Name of the betteralign binary to use (default "betteralign")
+  -fieldAlign
+    	Field align source files (default true)
+  -replaceInterfaces
+    	Replace interface types with concrete types where annotated (default true)
+  -generated
+    	Field align generated files (default false)
+  -runTests
+    	Will run tests before building the binary (default false)
+  -keep
+    	Keep the temporary directory with the aligned files (default false)
+  -doNotVendor
+    	Do not run 'go mod vendor' before building (default false)
+  -goArgs string
+    	Additional arguments to pass to the go compiler other than build
 `
 
 var (
@@ -51,22 +61,8 @@ var (
 	runTests          = flag.Bool("runTests", false, "Will run tests before building the binary")
 	keep              = flag.Bool("keep", false, "Keep the temporary directory with the aligned files")
 	doNotVendor       = flag.Bool("doNotVendor", false, "Do not run 'go mod vendor' before building")
-	goflags           stringArray
+	goArgs            = flag.String("goArgs", "", "Additional arguments to pass to the go compiler other than build")
 )
-
-// stringArray is a custom flag type that implements flag.Value to collect multiple strings
-type stringArray []string
-
-// String returns the string representation of the flag value (required by flag.Value interface)
-func (s *stringArray) String() string {
-	return strings.Join(*s, ",")
-}
-
-// Set appends the given value to the StringArray (required by flag.Value interface)
-func (s *stringArray) Set(value string) error {
-	*s = append(*s, value)
-	return nil
-}
 
 var (
 	goExecPath, alignPath string
@@ -90,7 +86,6 @@ func lookups() {
 func main() {
 	ctx := context.Background()
 
-	flag.Var(&goflags, "goflags", "Additional flags to pass to go compiler")
 	flag.Parse()
 
 	lookups()
@@ -191,10 +186,12 @@ func main() {
 		return
 	}
 
-	args := []string{"build"}
-	if goflags != nil {
-		args = append(args, goflags...)
+	extraArgs, err := shlex.Split(*goArgs)
+	if err != nil {
+		fmt.Printf("failed to parse --goArgs: %v", err)
 	}
+
+	args := append([]string{"build"}, extraArgs...)
 	out, err := exec.Command(goExecPath, args...).CombinedOutput()
 	if err != nil {
 		fmt.Printf("Could not run go build: %v\n%s", err, out)

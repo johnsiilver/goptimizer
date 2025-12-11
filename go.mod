@@ -1,13 +1,13 @@
 module github.com/johnsiilver/goptimizer
 
-go 1.24.0
+go 1.25.0
 
 toolchain go1.24.2
 
 require (
 	github.com/google/shlex v0.0.0-20191202100458-e7afc7fbc510
 	github.com/google/uuid v1.6.0
-	github.com/gostdlib/base v0.0.0-20251006165448-0ffd4328fcdd
+	github.com/gostdlib/base v0.0.0-20251203205244-dc5008750774
 	golang.org/x/tools v0.34.0
 )
 
@@ -109,4 +109,6 @@ require (
 	sigs.k8s.io/yaml v1.6.0 // indirect
 )
 
-tool github.com/dkorunic/betteralign/cmd/betteralign
+tool (
+	github.com/johnsiilver/betteralign/cmd/betteralign
+)

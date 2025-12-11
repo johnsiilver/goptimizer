@@ -12,9 +12,11 @@ You may pass flags to the `go` tool, however punctuation is slightly different.
 
 ## Installation
 ```bash
-go install github.com/dkorunic/betteralign/cmd/betteralign@latest
+go install github.com/johnsiilver/betteralign/cmd/betteralign@latest
 go install github.com/johnsiilver/goptimizer@latest
 ```
+!!!IMPORTANT!!!
+You will need to redo this anytime your Go version changes major versions.
 
 ## Running notes
 

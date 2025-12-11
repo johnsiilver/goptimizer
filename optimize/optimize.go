@@ -1,15 +1,19 @@
 package optimize
 
 import (
+	"errors"
 	"fmt"
 	"go/ast"
 	"go/format"
 	"go/token"
 	"go/types"
+	"log"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
+	"unsafe"
 
 	"github.com/gostdlib/base/context"
 	"github.com/gostdlib/base/statemachine"
@@ -51,22 +55,30 @@ func Packages(ctx context.Context, a Args) error {
 		testFiles:      a.RunTests,
 	}
 
+	found := atomic.Uint32{}
+	complete := atomic.Uint32{}
 	wdErr := filepath.WalkDir(
 		a.Root,
 		func(path string, d os.DirEntry, err error) error {
 			switch {
+			case ctx.Err() != nil:
+				return ctx.Err()
 			case err != nil:
 				return err
 			case d.IsDir() && strings.HasPrefix(d.Name(), "."):
 				// Skip this directory and all of its contents
 				return filepath.SkipDir
 			case d.IsDir():
+				found.Add(1)
+				log.Printf("found: %d, completed: %d", found.Load(), complete.Load())
 				_ = wg.Go(
 					ctx,
 					func(ctx context.Context) error {
+						defer func() { log.Printf("found: %d, completed: %d", found.Load(), complete.Load()) }()
 						_, err := statemachine.Run(
-							"",
+							"optmize",
 							statemachine.Request[data]{
+								Ctx: ctx,
 								Data: data{
 									path:                 path,
 									fieldAlign:           a.FieldAlign,
@@ -75,7 +87,9 @@ func Packages(ctx context.Context, a Args) error {
 								Next: sm.parsePackage,
 							},
 						)
+						complete.Add(1)
 						if err != nil {
+							log.Printf("optimzation error(%s): %s", path, err)
 							cancel()
 						}
 						return err
@@ -86,10 +100,14 @@ func Packages(ctx context.Context, a Args) error {
 		},
 	)
 	if wdErr != nil {
-		return wdErr
+		return fmt.Errorf("walk directory error: %s", wdErr)
 	}
 
-	return wg.Wait(ctx)
+	log.Println("waiting for optimizations to complete")
+	if err := wg.Wait(ctx); err != nil {
+		return fmt.Errorf("optimization error: %s", err)
+	}
+	return nil
 }
 
 // data holds the data being passed through the state machine.
@@ -121,7 +139,7 @@ type packageSM struct {
 func (p packageSM) parsePackage(req statemachine.Request[data]) statemachine.Request[data] {
 	df, err := os.ReadDir(req.Data.path)
 	if err != nil {
-		req.Err = err
+		req.Err = fmt.Errorf("os.ReadDir: %s", err)
 		return req
 	}
 
@@ -145,7 +163,11 @@ func (p packageSM) parsePackage(req statemachine.Request[data]) statemachine.Req
 	}
 	pkgs, err := packages.Load(cfg, ".")
 	if err != nil {
-		req.Err = fmt.Errorf("failed to parse pacakge %q", req.Data.path)
+		if errDoNotCare(err.Error()) {
+			req.Next = p.interfaceReplacement
+			return req
+		}
+		req.Err = fmt.Errorf("failed to parse package %q", req.Data.path)
 		return req
 	}
 	if len(pkgs) == 0 {
@@ -189,15 +211,24 @@ func (p packageSM) fieldAlign(req statemachine.Request[data]) statemachine.Reque
 	}
 	args = append(args, ".")
 
-	// betteralign recommends running twice to ensure optimal alignment.
-	for i := 0; i < 2; i++ {
-		cmd := exec.Command(p.alignPath, args...)
-		cmd.Path = req.Data.path
-		_, err := exec.Command(p.alignPath, args...).CombinedOutput()
-		if err != nil {
-			req.Err = err
+	cmd := exec.Command(p.alignPath, args...)
+	cmd.Path = req.Data.path
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		var ee *exec.ExitError
+		if errors.As(err, &ee) {
+			if ee.ExitCode() == 3 {
+				// Changes were made, but we don't care about the error.
+				req.Next = p.runTests
+				return req
+			}
+		}
+		if errDoNotCare(out) {
+			req.Next = p.interfaceReplacement
 			return req
 		}
+		req.Err = fmt.Errorf("exec on alignPath: %s", string(out))
+		return req
 	}
 	req.Next = p.runTests
 
@@ -218,6 +249,11 @@ func (p packageSM) runTests(req statemachine.Request[data]) statemachine.Request
 	cmd.Dir = req.Data.path
 	out, err := cmd.CombinedOutput()
 	if err != nil {
+		if isConstraintsErr(out) {
+			log.Printf("skipping tests for %s due to build constraints", req.Data.path)
+			req.Next = p.interfaceReplacement
+			return req
+		}
 		req.Err = fmt.Errorf("problem running tests: %v\n%s", err, string(out))
 	}
 	req.Next = p.interfaceReplacement
@@ -322,6 +358,10 @@ func (p packageSM) goBuild(req statemachine.Request[data]) statemachine.Request[
 	cmd.Dir = req.Data.path
 	out, err := cmd.CombinedOutput()
 	if err != nil {
+		if isConstraintsErr(out) {
+			log.Printf("skipping build for %s due to build constraints", req.Data.path)
+			return req
+		}
 		req.Err = fmt.Errorf("problem running go build: %v\n%s", err, string(out))
 	}
 	return req
@@ -503,32 +543,69 @@ func findImportPath(file *ast.File, pkgName string) string {
 func writeFile(filename string, fset *token.FileSet, file *ast.File) error {
 	info, err := os.Stat(filename)
 	if err != nil {
-		return err
+		return fmt.Errorf("writeFile: %w", err)
 	}
 
 	tmpFile, err := os.CreateTemp(filepath.Dir(filename), ".tmp-"+filepath.Base(filename))
 	if err != nil {
-		return err
+		return fmt.Errorf("CreateTemp: %w", err)
 	}
 	tmpName := tmpFile.Name()
 	defer os.Remove(tmpName)
 
 	if err := format.Node(tmpFile, fset, file); err != nil {
 		tmpFile.Close()
-		return err
+		return fmt.Errorf("format.Node: %w", err)
 	}
 
 	if err := tmpFile.Close(); err != nil {
-		return err
+		return fmt.Errorf("tmpFile.Close: %w", err)
 	}
 
 	if err := os.Rename(tmpName, filename); err != nil {
-		return err
+		return fmt.Errorf("os.Rename: %w", err)
 	}
 
 	if err := os.Chmod(filename, info.Mode()); err != nil {
-		return err
+		return fmt.Errorf("os.Chmod: %w", err)
 	}
 
 	return nil
+}
+
+func errDoNotCare[T []byte | string](out T) bool {
+	var b []byte
+	switch x := any(out).(type) {
+	case string:
+		b = unsafe.Slice(unsafe.StringData(x), len(x))
+	}
+	switch {
+	case isConstraintsErr(b), osExit3(b), goWork(b), failedToParsePackage(b):
+		return true
+	}
+	return false
+}
+
+func isConstraintsErr(out []byte) bool {
+	errStr := unsafe.String(unsafe.SliceData(out), len(out))
+	return strings.Contains(errStr, "build constraints exclude")
+}
+
+// osExit3 checks if the output indicates that changes where made by betteralign.
+// Not sure why this triggers an exit code 3. Can't find that in their source.
+func osExit3(out []byte) bool {
+	errStr := unsafe.String(unsafe.SliceData(out), len(out))
+	return strings.Contains(errStr, "bytes saved")
+}
+
+func failedToParsePackage(out []byte) bool {
+	errStr := unsafe.String(unsafe.SliceData(out), len(out))
+	return strings.Contains(errStr, "failed to parse pacakge")
+}
+
+// goWork checks if the output indicates an issue with go.work file. Sometimes people
+// put these in and betteralign can't handle them.
+func goWork(out []byte) bool {
+	errStr := unsafe.String(unsafe.SliceData(out), len(out))
+	return strings.Contains(errStr, "go.work file")
 }
